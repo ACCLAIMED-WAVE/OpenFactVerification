@@ -68,11 +68,21 @@ def crawl_web(query_url_dict: dict):
 
 # @backoff.on_exception(backoff.expo, (requests.exceptions.RequestException, requests.exceptions.Timeout), max_tries=1,max_time=3)
 def common_web_request(url: str, query: str = None, timeout: int = 3):
-    resp = requests.get(url, headers=headers, timeout=timeout)
-    if query:
-        return resp, query
-    else:
-        return resp
+    from factcheck.utils.logger import CustomLogger
+    logger = CustomLogger(__name__).getlog()
+    
+    try:
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        logger.debug(f"[common_web_request] Request to {url}: status={resp.status_code}, size={len(resp.text)} bytes")
+        if resp.status_code != 200:
+            logger.warning(f"[common_web_request] Non-200 status code for {url}: {resp.status_code}")
+        if query:
+            return resp, query
+        else:
+            return resp
+    except requests.exceptions.RequestException as e:
+        logger.error(f"[common_web_request] Request failed for {url}: {e}")
+        raise
 
 
 def parse_response(response: requests.Response, url: str, query: str = None):
@@ -126,16 +136,50 @@ def scrape_url(url: str, timeout: float = 3):
     return web_text, url
 
 
-def crawl_google_web(response, top_k: int = 10):
-    soup = bs4.BeautifulSoup(response.text, "html.parser")
-    # with open("text%d.html"%time.time(), 'w') as fw:
-    #     fw.write(response.text)
+def crawl_google_web(response, top_k: int = 10, page_index: int = None):
+    from factcheck.utils.logger import CustomLogger
+    logger = CustomLogger(__name__).getlog()
+    
+    if not response or not hasattr(response, 'text'):
+        logger.error(f"[crawl_google_web] Invalid response object received")
+        return []
+    
+    response_text = response.text if hasattr(response, 'text') else str(response)
+    if not response_text or len(response_text) < 100:
+        logger.warning(f"[crawl_google_web] Response is empty or too short (length: {len(response_text) if response_text else 0})")
+        return []
+    
+    soup = bs4.BeautifulSoup(response_text, "html.parser")
+    
+    all_links = soup.find_all("a", {"href": True})
+    logger.debug(f"[crawl_google_web] Found {len(all_links)} total <a> tags with href attributes")
+    
     valid_node_list = list()
-    for node in soup.find_all("a", {"href": True}):
+    for node in all_links:
         if node.findChildren("h3"):
             valid_node_list.append(node)
+    
+    logger.debug(f"[crawl_google_web] Found {len(valid_node_list)} links with <h3> children (Google search result pattern)")
+    
     result_urls = list()
     for node in valid_node_list:
-        result_urls.append(node.get("href"))
-    # result_urls = [link.get("href") for link in node if link.get("href")]
+        href = node.get("href")
+        if href:
+            result_urls.append(href)
+    
+    if len(result_urls) == 0:
+        timestamp = int(time.time() * 1000000)
+        index_str = f"_{page_index}" if page_index is not None else ""
+        filename = f"/tmp/google_result_page_{timestamp}{index_str}.html"
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(response_text)
+            logger.warning(f"[crawl_google_web] No URLs extracted! Saved full HTML to {filename}")
+        except Exception as e:
+            logger.error(f"[crawl_google_web] Failed to save HTML to {filename}: {e}")
+        logger.warning(f"[crawl_google_web] Response length: {len(response_text)}, Response preview: {response_text[:500]}")
+        logger.warning(f"[crawl_google_web] This likely means Google's HTML structure has changed or the request was blocked")
+        if "captcha" in response_text.lower() or "unusual traffic" in response_text.lower():
+            logger.error(f"[crawl_google_web] Google may have blocked the request (CAPTCHA detected)")
+    
     return result_urls[:top_k]

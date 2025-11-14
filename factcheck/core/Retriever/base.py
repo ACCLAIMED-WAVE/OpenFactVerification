@@ -76,20 +76,46 @@ class BaseRetriever:
         Returns:
             dict: A dictionary of claims and their corresponding evidences.
         """
+        logger.info(f"[BaseRetriever] Retrieving evidence for claim: '{claim}' with queries: {query_list}")
 
         query_url_dict = self._get_query_urls(query_list)
+        total_urls = sum(len(urls) for urls in query_url_dict.values())
+        logger.info(f"[BaseRetriever] Step 1 complete: Found {total_urls} URLs across {len(query_url_dict)} queries")
+        
         query_scraped_results_dict = self._crawl_and_parse_web(query_url_dict=query_url_dict)
+        total_scraped = sum(len(results) for results in query_scraped_results_dict.values())
+        logger.info(f"[BaseRetriever] Step 2 complete: Successfully scraped {total_scraped} web pages")
+        
         evidences = self._get_relevant_snippets(query_scraped_results_dict=query_scraped_results_dict)
+        logger.info(f"[BaseRetriever] Step 3 complete: Extracted {len(evidences)} evidence snippets for claim '{claim}'")
         return evidences
 
     def _crawl_and_parse_web(self, query_url_dict: dict[str, list]):
+        total_urls_to_crawl = sum(len(urls) for urls in query_url_dict.values())
+        logger.info(f"[BaseRetriever] Starting web crawling: {total_urls_to_crawl} URLs across {len(query_url_dict)} queries")
+        
         responses = crawl_web(query_url_dict=query_url_dict)
+        logger.info(f"[BaseRetriever] Received {len(responses)} responses from crawl_web")
+        
         query_responses_dict = dict()
+        successful_responses = 0
+        failed_responses = 0
+        pdf_skipped = 0
+        
         for flag, response, url, query in responses:
-            if flag and ".pdf" not in str(response.url):
-                response_list = query_responses_dict.get(query, [])
-                response_list.append([response, url])
-                query_responses_dict[query] = response_list
+            if flag:
+                if ".pdf" not in str(response.url):
+                    response_list = query_responses_dict.get(query, [])
+                    response_list.append([response, url])
+                    query_responses_dict[query] = response_list
+                    successful_responses += 1
+                else:
+                    pdf_skipped += 1
+            else:
+                failed_responses += 1
+                logger.warning(f"[BaseRetriever] Failed to fetch URL: {url} for query: {query}")
+        
+        logger.info(f"[BaseRetriever] Web crawling summary: {successful_responses} successful, {failed_responses} failed, {pdf_skipped} PDFs skipped")
 
         query_scraped_results_dict = dict()
         with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
@@ -103,14 +129,19 @@ class BaseRetriever:
             scraped_results_list = query_scraped_results_dict.get(query, [])
             scraped_results_list.append([web_text, url])
             query_scraped_results_dict[query] = scraped_results_list
+        
         # Remove URLs if we weren't able to scrape anything or if they are a PDF.
+        total_with_content = 0
         for query in query_scraped_results_dict.keys():
             scraped_results_list = query_scraped_results_dict.get(query)
             # remove if crawled web text is null
             scraped_results = [pair for pair in scraped_results_list if pair[0]]
+            total_with_content += len(scraped_results)
             # get top scraped results by self.max_search_result_per_query
             query_scraped_results_dict[query] = scraped_results[: self.max_search_result_per_query]
-        # print("query_scraped_res", query_scraped_results_dict)
+            logger.info(f"[BaseRetriever] Query '{query}': {len(scraped_results)} pages with content, keeping top {len(query_scraped_results_dict[query])}")
+        
+        logger.info(f"[BaseRetriever] Web parsing complete: {total_with_content} pages with content across all queries")
         return query_scraped_results_dict
 
     def _get_relevant_snippets(self, query_scraped_results_dict: dict[str:list]):
@@ -122,10 +153,18 @@ class BaseRetriever:
         Returns:
             dict: A dictionary of queries and their corresponding relevant snippets.
         """
+        logger.info(f"[BaseRetriever] Extracting relevant snippets from {len(query_scraped_results_dict)} queries")
+        
+        if not query_scraped_results_dict:
+            logger.warning("[BaseRetriever] No scraped results available for snippet extraction!")
+            return []
+        
         # 4+ 5 chunk to split web text to several passage and score and sort
         snippets_dict = {}
         for query, scraped_results in query_scraped_results_dict.items():
+            logger.info(f"[BaseRetriever] Processing snippets for query '{query}' with {len(scraped_results)} scraped pages")
             snippets_dict[query] = self._sorted_passage_by_relevant_score(query, scraped_results=scraped_results)
+            logger.info(f"[BaseRetriever] Query '{query}': Found {len(snippets_dict[query])} candidate passages")
             snippets_dict[query] = deepcopy(
                 sorted(
                     snippets_dict[query],
@@ -133,17 +172,20 @@ class BaseRetriever:
                     reverse=True,
                 )[:5]
             )
+            logger.info(f"[BaseRetriever] Query '{query}': Keeping top {len(snippets_dict[query])} passages")
 
         evidences = {}
         evidences["aggregated"] = []
         evidences["question_wise"] = deepcopy(snippets_dict)
         for key in evidences["question_wise"]:
             # Take top evidences for each question
-            index = int(len(evidences["aggregated"]) / len(evidences["question_wise"]))
-            evidences["aggregated"].append(evidences["question_wise"][key][index])
-            if len(evidences["aggregated"]) >= self.max_passages_per_search_result_to_return:
-                break
-        # 6
+            if len(evidences["question_wise"][key]) > 0:
+                index = int(len(evidences["aggregated"]) / len(evidences["question_wise"]))
+                evidences["aggregated"].append(evidences["question_wise"][key][index])
+                if len(evidences["aggregated"]) >= self.max_passages_per_search_result_to_return:
+                    break
+        
+        logger.info(f"[BaseRetriever] Snippet extraction complete: {len(evidences['aggregated'])} final evidence snippets")
         return evidences["aggregated"]
 
     def _sorted_passage_by_relevant_score(self, query: str, scraped_results: list[str]):
@@ -160,9 +202,12 @@ class BaseRetriever:
         weball = ""
         for webtext, url in scraped_results:
             weball += webtext
+        logger.debug(f"[BaseRetriever] Query '{query}': Combined text length: {len(weball)} characters from {len(scraped_results)} pages")
         passages = self._chunk_text(text=weball, tokenizer=self.tokenizer)
         if not passages:
+            logger.warning(f"[BaseRetriever] Query '{query}': No passages extracted from text (text length: {len(weball)})")
             return []
+        logger.debug(f"[BaseRetriever] Query '{query}': Extracted {len(passages)} passages for ranking")
         # Score the passages by relevance to the query using a cross-encoder.
         scores = self.passage_ranker.predict([(query, p[0]) for p in passages]).tolist()
         passage_scores = list(zip(passages, scores))
