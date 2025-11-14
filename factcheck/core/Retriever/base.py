@@ -45,7 +45,7 @@ class BaseRetriever:
         """
         self.max_search_result_per_query = m
 
-    def retrieve_evidence(self, claim_query_dict):
+    def retrieve_evidence(self, claim_queries_dict):
         """Retrieve evidence for a list of claims.
         1. get google search page result by generated questions
         2. crawl all web from urls and extract text
@@ -54,13 +54,13 @@ class BaseRetriever:
         5. return single claims evidences;
 
         Args:
-            claim_query_dict (dict): A dictionary of claims and their corresponding queries.
+            claim_queries_dict (dict): A dictionary of claims and their corresponding queries.
 
         Returns:
             dict: A dictionary of claims and their corresponding evidences.
         """
         claim_evidence_dict = {}
-        for claim, query_list in claim_query_dict.items():
+        for claim, query_list in claim_queries_dict.items():
             logger.info(f"Collecting evidences for claim : {claim}")
             evidences = self._retrieve_evidence4singleclaim(claim, query_list=query_list)
             claim_evidence_dict[claim] = evidences

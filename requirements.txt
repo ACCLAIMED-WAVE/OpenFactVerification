@@ -10,3 +10,7 @@ pandas
 playwright
 playwright_stealth
 tiktoken
+ipykernel
+PyYAML
+spacy
+sentence-transformers
